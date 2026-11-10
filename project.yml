@@ -9,6 +9,9 @@ targets:
     platform: iOS
     sources:
       - path: Sources
+    dependencies:
+      - target: RJGoviiPacketTunnel
+        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.govindmaurya.rjgovii-proxy
@@ -18,3 +21,19 @@ targets:
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         GENERATE_INFOPLIST_FILE: YES
+  RJGoviiPacketTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: PacketTunnel
+    entitlements:
+      path: PacketTunnel/PacketTunnel.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.govindmaurya.rjgovii-proxy.PacketTunnel
+        PRODUCT_NAME: RJGoviiPacketTunnel
+        SWIFT_VERSION: 5.0
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_NSExtension_NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+        INFOPLIST_KEY_NSExtension_NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
