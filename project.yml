@@ -9,6 +9,8 @@ targets:
     platform: iOS
     sources:
       - path: Sources
+    entitlements:
+      path: Sources/RJGoviiProxy.entitlements
     dependencies:
       - target: RJGoviiPacketTunnel
         embed: true
