@@ -1,11 +1,10 @@
 import SwiftUI
+import Network
 
 @main
 struct RJGoviiProxyApp: App {
     var body: some Scene {
-        WindowGroup {
-            ProxyHomeView()
-        }
+        WindowGroup { ProxyHomeView() }
     }
 }
 
@@ -24,7 +23,9 @@ final class ProxyStore: ObservableObject {
         ProxyProfile(name: "drag hs", host: "62.171.157.60", port: "11111", protocolName: "HTTP")
     ]
     @Published var selectedID: UUID?
-    @Published var status = "Not connected"
+    @Published var status = "Not tested"
+    @Published var isTesting = false
+    private var testConnection: NWConnection?
 
     init() { selectedID = profiles.first?.id }
 
@@ -38,12 +39,73 @@ final class ProxyStore: ObservableObject {
         profiles.removeAll { $0.id == profile.id }
         if selectedID == profile.id { selectedID = profiles.first?.id }
     }
+
+    func testSelectedProxy() {
+        guard let profile = profiles.first(where: { $0.id == selectedID }),
+              let portNumber = UInt16(profile.port),
+              let endpointPort = NWEndpoint.Port(rawValue: portNumber) else {
+            status = "Select a valid server and port"
+            return
+        }
+        testConnection?.cancel()
+        isTesting = true
+        status = "Connecting to proxy…"
+        let connection = NWConnection(host: NWEndpoint.Host(profile.host), port: endpointPort, using: .tcp)
+        testConnection = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                let request = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Connection: Keep-Alive\r\n\r\n"
+                connection.send(content: request.data(using: .utf8), completion: .contentProcessed { error in
+                    if let error {
+                        Task { @MainActor in self?.status = "Send failed: \(error.localizedDescription)"; self?.isTesting = false }
+                        connection.cancel()
+                        return
+                    }
+                    connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, _, error in
+                        let response = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                        let firstLine = response.components(separatedBy: "\r\n").first ?? ""
+                        Task { @MainActor in
+                            if let error {
+                                self?.status = "Receive failed: \(error.localizedDescription)"
+                            } else if firstLine.contains(" 200 ") {
+                                self?.status = "HTTP CONNECT supported ✓"
+                            } else if firstLine.hasPrefix("HTTP/") {
+                                self?.status = "Proxy replied: \(firstLine)"
+                            } else {
+                                self?.status = "Connected, but no valid HTTP proxy reply"
+                            }
+                            self?.isTesting = false
+                        }
+                        connection.cancel()
+                    }
+                })
+            case .failed(let error):
+                Task { @MainActor in self?.status = "Connection failed: \(error.localizedDescription)"; self?.isTesting = false }
+                connection.cancel()
+            case .cancelled:
+                break
+            default:
+                break
+            }
+        }
+        connection.start(queue: .global(qos: .userInitiated))
+        DispatchQueue.global().asyncAfter(deadline: .now() + 12) { [weak self, weak connection] in
+            guard let connection, connection.state != .cancelled else { return }
+            Task { @MainActor in
+                if self?.isTesting == true {
+                    self?.status = "Test timed out"
+                    self?.isTesting = false
+                }
+            }
+            connection.cancel()
+        }
+    }
 }
 
 struct ProxyHomeView: View {
     @StateObject private var store = ProxyStore()
     @State private var showAdd = false
-
     private let red = Color(red: 0.88, green: 0.08, blue: 0.18)
 
     var body: some View {
@@ -89,9 +151,19 @@ struct ProxyHomeView: View {
                         }.padding(16).background(Color.white.opacity(0.045)).clipShape(RoundedRectangle(cornerRadius: 20))
 
                         VStack(alignment: .leading, spacing: 12) {
-                            Label("CONNECTION", systemImage: "network").font(.headline).foregroundStyle(.white)
-                            Text(store.status).font(.subheadline).foregroundStyle(.gray)
-                            Text("This starter build stores profiles only. It does not create a VPN tunnel or change game traffic.")
+                            Label("PROXY TEST", systemImage: "network").font(.headline).foregroundStyle(.white)
+                            Text(store.status).font(.subheadline).foregroundStyle(.white)
+                            Button {
+                                store.testSelectedProxy()
+                            } label: {
+                                HStack {
+                                    if store.isTesting { ProgressView().tint(.white) }
+                                    Text(store.isTesting ? "TESTING…" : "TEST HTTP CONNECT")
+                                }
+                                .font(.subheadline.bold()).frame(maxWidth: .infinity).padding()
+                                .background(red).foregroundStyle(.white).clipShape(RoundedRectangle(cornerRadius: 14))
+                            }.disabled(store.isTesting)
+                            Text("This checks whether the selected server accepts an HTTP CONNECT request. It does not enable a device-wide VPN or route game traffic.")
                                 .font(.footnote).foregroundStyle(.orange)
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
                             .background(Color.white.opacity(0.045)).clipShape(RoundedRectangle(cornerRadius: 20))
@@ -127,7 +199,7 @@ struct AddProxyView: View {
                 TextField("Port", text: $port).keyboardType(.numberPad)
                 LabeledContent("Authentication", value: "None")
                 Section {
-                    Text("Choose the protocol that the proxy provider specifies. An HTTPS website tunnel via HTTP CONNECT is not the same as a TLS-wrapped HTTPS proxy.")
+                    Text("HTTP CONNECT support is tested separately. HTTPS proxy means TLS to the proxy itself and is not the same as an HTTPS website tunnel.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
