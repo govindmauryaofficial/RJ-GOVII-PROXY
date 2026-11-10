@@ -1,5 +1,6 @@
 import SwiftUI
 import Network
+import NetworkExtension
 
 @main
 struct RJGoviiProxyApp: App {
@@ -103,8 +104,57 @@ final class ProxyStore: ObservableObject {
     }
 }
 
+@MainActor
+final class VPNProfileController: ObservableObject {
+    @Published var status = "VPN profile not configured"
+    @Published var isSaving = false
+
+    func installProfile(using profile: ProxyProfile) {
+        isSaving = true
+        status = "Preparing iOS VPN profile…"
+        NETunnelProviderManager.loadAllFromPreferences { managers, loadError in
+            if let loadError {
+                Task { @MainActor in
+                    self.status = "Could not load VPN settings: \(loadError.localizedDescription)"
+                    self.isSaving = false
+                }
+                return
+            }
+
+            let manager = managers?.first ?? NETunnelProviderManager()
+            let tunnel = NETunnelProviderProtocol()
+            tunnel.providerBundleIdentifier = "com.govindmaurya.rjgovii-proxy.PacketTunnel"
+            tunnel.serverAddress = "\(profile.host):\(profile.port)"
+            manager.protocolConfiguration = tunnel
+            manager.localizedDescription = "RJ GOVII PROXY"
+            manager.isEnabled = true
+
+            manager.saveToPreferences { saveError in
+                Task { @MainActor in
+                    if let saveError {
+                        self.status = "VPN profile save failed: \(saveError.localizedDescription)"
+                        self.isSaving = false
+                        return
+                    }
+                    manager.loadFromPreferences { reloadError in
+                        Task { @MainActor in
+                            if let reloadError {
+                                self.status = "Profile saved, reload failed: \(reloadError.localizedDescription)"
+                            } else {
+                                self.status = "VPN profile saved. Apple Network Extension entitlement and a working tunnel transport are still required."
+                            }
+                            self.isSaving = false
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct ProxyHomeView: View {
     @StateObject private var store = ProxyStore()
+    @StateObject private var vpnProfile = VPNProfileController()
     @State private var showAdd = false
     private let red = Color(red: 0.88, green: 0.08, blue: 0.18)
 
@@ -149,6 +199,26 @@ struct ProxyHomeView: View {
                                     .background(red).foregroundStyle(.white).clipShape(RoundedRectangle(cornerRadius: 14))
                             }
                         }.padding(16).background(Color.white.opacity(0.045)).clipShape(RoundedRectangle(cornerRadius: 20))
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            Label("iOS VPN PROFILE", systemImage: "lock.shield").font(.headline).foregroundStyle(.white)
+                            Text(vpnProfile.status).font(.subheadline).foregroundStyle(.white)
+                            Button {
+                                if let selected = store.profiles.first(where: { $0.id == store.selectedID }) {
+                                    vpnProfile.installProfile(using: selected)
+                                }
+                            } label: {
+                                HStack {
+                                    if vpnProfile.isSaving { ProgressView().tint(.white) }
+                                    Text(vpnProfile.isSaving ? "SAVING PROFILE…" : "INSTALL VPN PROFILE")
+                                }
+                                .font(.subheadline.bold()).frame(maxWidth: .infinity).padding()
+                                .background(red).foregroundStyle(.white).clipShape(RoundedRectangle(cornerRadius: 14))
+                            }.disabled(vpnProfile.isSaving || store.selectedID == nil)
+                            Text("This saves an iOS VPN configuration only. It does not start a working tunnel. Apple must approve the Network Extension entitlement, and the packet transport still needs implementation and testing.")
+                                .font(.footnote).foregroundStyle(.orange)
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
+                            .background(Color.white.opacity(0.045)).clipShape(RoundedRectangle(cornerRadius: 20))
 
                         VStack(alignment: .leading, spacing: 12) {
                             Label("PROXY TEST", systemImage: "network").font(.headline).foregroundStyle(.white)
