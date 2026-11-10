@@ -108,6 +108,54 @@ final class ProxyStore: ObservableObject {
 final class VPNProfileController: ObservableObject {
     @Published var status = "VPN profile not configured"
     @Published var isSaving = false
+    @Published var isStarting = false
+    @Published var isStopping = false
+    @Published var vpnStatus = "Disconnected"
+    private var manager: NETunnelProviderManager?
+    private var statusObserver: NSObjectProtocol?
+
+    init() {
+        statusObserver = NotificationCenter.default.addObserver(
+            forName: .NEVPNStatusDidChange, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let connection = notification.object as? NEVPNConnection else { return }
+            Task { @MainActor in self?.updateStatus(connection.status) }
+        }
+        refreshStatus()
+    }
+
+    deinit {
+        if let statusObserver { NotificationCenter.default.removeObserver(statusObserver) }
+    }
+
+    private func updateStatus(_ value: NEVPNStatus) {
+        switch value {
+        case .connected: vpnStatus = "Connected"
+        case .connecting: vpnStatus = "Connecting…"
+        case .reasserting: vpnStatus = "Reconnecting…"
+        case .disconnecting: vpnStatus = "Disconnecting…"
+        case .disconnected: vpnStatus = "Disconnected"
+        case .invalid: vpnStatus = "Not configured"
+        @unknown default: vpnStatus = "Unknown"
+        }
+    }
+
+    func refreshStatus() {
+        NETunnelProviderManager.loadAllFromPreferences { managers, error in
+            Task { @MainActor in
+                if let error {
+                    self.status = "Could not load VPN settings: \(error.localizedDescription)"
+                    return
+                }
+                self.manager = managers?.first
+                if let connection = self.manager?.connection {
+                    self.updateStatus(connection.status)
+                } else {
+                    self.vpnStatus = "Not configured"
+                }
+            }
+        }
+    }
 
     func installProfile(using profile: ProxyProfile) {
         isSaving = true
@@ -130,24 +178,59 @@ final class VPNProfileController: ObservableObject {
             manager.isEnabled = true
 
             manager.saveToPreferences { saveError in
-                Task { @MainActor in
-                    if let saveError {
+                if let saveError {
+                    Task { @MainActor in
                         self.status = "VPN profile save failed: \(saveError.localizedDescription)"
                         self.isSaving = false
-                        return
                     }
-                    manager.loadFromPreferences { reloadError in
-                        Task { @MainActor in
-                            if let reloadError {
-                                self.status = "Profile saved, reload failed: \(reloadError.localizedDescription)"
-                            } else {
-                                self.status = "VPN profile saved. Apple Network Extension entitlement and a working tunnel transport are still required."
-                            }
-                            self.isSaving = false
+                    return
+                }
+                manager.loadFromPreferences { reloadError in
+                    Task { @MainActor in
+                        self.isSaving = false
+                        if let reloadError {
+                            self.status = "Profile saved, reload failed: \(reloadError.localizedDescription)"
+                        } else {
+                            self.manager = manager
+                            self.status = "VPN profile saved. Tunnel transport and Apple's entitlement are still required."
+                            self.updateStatus(manager.connection.status)
                         }
                     }
                 }
             }
+        }
+    }
+
+    func connect() {
+        guard let manager else {
+            status = "Install the VPN profile first"
+            return
+        }
+        isStarting = true
+        do {
+            try manager.connection.startVPNTunnel()
+            status = "Start requested. Waiting for iOS tunnel status…"
+        } catch {
+            status = "VPN start failed: \(error.localizedDescription)"
+            isStarting = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            self.refreshStatus()
+            self.isStarting = false
+        }
+    }
+
+    func disconnect() {
+        guard let manager else {
+            status = "No VPN profile is loaded"
+            return
+        }
+        isStopping = true
+        manager.connection.stopVPNTunnel()
+        status = "Disconnect requested"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            self.refreshStatus()
+            self.isStopping = false
         }
     }
 }
@@ -215,6 +298,26 @@ struct ProxyHomeView: View {
                                 .font(.subheadline.bold()).frame(maxWidth: .infinity).padding()
                                 .background(red).foregroundStyle(.white).clipShape(RoundedRectangle(cornerRadius: 14))
                             }.disabled(vpnProfile.isSaving || store.selectedID == nil)
+                            HStack {
+                                Text("VPN STATUS").font(.caption.bold()).foregroundStyle(.gray)
+                                Spacer()
+                                Text(vpnProfile.vpnStatus).font(.subheadline.bold())
+                                    .foregroundStyle(vpnProfile.vpnStatus == "Connected" ? .green : .white)
+                            }
+                            HStack(spacing: 10) {
+                                Button { vpnProfile.connect() } label: {
+                                    Label("CONNECT", systemImage: "play.fill")
+                                        .font(.subheadline.bold()).frame(maxWidth: .infinity).padding()
+                                        .background(Color.green.opacity(0.85)).foregroundStyle(.white)
+                                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                                }.disabled(vpnProfile.isSaving || vpnProfile.isStarting || vpnProfile.vpnStatus == "Connected" || vpnProfile.vpnStatus == "Not configured")
+                                Button { vpnProfile.disconnect() } label: {
+                                    Label("DISCONNECT", systemImage: "stop.fill")
+                                        .font(.subheadline.bold()).frame(maxWidth: .infinity).padding()
+                                        .background(Color.white.opacity(0.12)).foregroundStyle(.white)
+                                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                                }.disabled(vpnProfile.isStopping || vpnProfile.vpnStatus == "Disconnected" || vpnProfile.vpnStatus == "Not configured")
+                            }
                             Text("This saves an iOS VPN configuration only. It does not start a working tunnel. Apple must approve the Network Extension entitlement, and the packet transport still needs implementation and testing.")
                                 .font(.footnote).foregroundStyle(.orange)
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
